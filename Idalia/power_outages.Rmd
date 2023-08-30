@@ -1,0 +1,187 @@
+---
+title: "power_outage_scrape"
+output: html_document
+date: "2023-08-28"
+---
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(rvest)
+```
+
+```{r}
+#Scrape links to electric provider charts
+
+url <- "https://poweroutage.us/area/state/florida"
+
+html <- read_html(url)
+
+# Extract provider chart URLs
+provider_chart_links <- html %>%
+  html_element(".table-striped") %>% 
+  html_nodes("a") %>% 
+  html_attr("href") %>% 
+  tibble()
+
+provider_chart_links <- provider_chart_links %>% 
+  mutate(base = "https://poweroutage.us/",
+         full = paste0(base,.)) %>% 
+  select(full)
+
+```
+
+```{r}
+#Set up for loop to scrape each link in provider chart
+
+#Initialize an empty list to store the data frames
+company_updates <- list()
+
+# Loop through each link
+for (i in 1:nrow(provider_chart_links)) {
+  url <- provider_chart_links$full[i]
+  
+  html <- read_html(url)
+  
+  company_base <- html %>%
+  html_element("h1") %>% 
+  paste0()
+  
+  #extract actual name
+  company <- str_split(company_base, pattern = '<h1>\n|</h1>', simplify = TRUE)[,2]
+  
+  #Repeat for last update, just so we have it:
+  datetime_base <- html %>%
+  html_element(".datetime") %>% 
+  paste0()
+  
+  #Extract date and time from value
+  date_time <- str_split(datetime_base, pattern = '<item class="datetime">|</item>', simplify = TRUE)[,2]
+  
+  #Now grab the rest of the table:
+  table <- html %>%
+  html_element(".table-striped") %>% 
+  html_table() 
+  
+table <- table %>% 
+  clean_names() %>% 
+  select(-x) %>% 
+  mutate(company = company,
+         date_time = date_time)
+  
+  ### Append the data frame to the list
+  company_updates <- bind_rows(company_updates, table)
+}
+
+```
+
+```{r}
+#Remove everything from Duke and re-scrape -- it has a chart for South Carolina that's screwing everything up, but it seems to be the only company where this is the case
+
+#first trim the white space or it won't work
+company_updates$company <- trimws(company_updates$company)
+
+company_updates <- company_updates %>% 
+  filter(company != "Duke Energy")
+
+#Re-scrape
+url <- "https://poweroutage.us/area/utility/35"
+  
+  html <- read_html(url)
+  
+  company_base <- html %>%
+  html_element("h1") %>% 
+  paste0()
+  
+  #extract actual name
+  company <- str_split(company_base, pattern = '<h1>\n|</h1>', simplify = TRUE)[,2]
+  
+  #Repeat for last update, just so we have it:
+  datetime_base <- html %>%
+  html_element(".datetime") %>% 
+  paste0()
+  
+  #Extract date and time from value
+  date_time <- str_split(datetime_base, pattern = '<item class="datetime">|</item>', simplify = TRUE)[,2]
+  
+  #Now grab the rest of the table:
+table_elements <- html %>%
+  html_elements(".table-striped") 
+
+# Extract the third data frame from the list
+table <- table_elements[[2]] %>%
+  html_table() 
+
+table <- table %>% 
+  clean_names() %>% 
+  select(-x) %>% 
+  mutate(company = company,
+         date_time = date_time)
+
+#bind to the rest of the df
+company_updates <- bind_rows(company_updates, table)
+  
+```
+
+
+```{r}
+#Time and date of download -- will use for analysis later
+company_updates <- company_updates %>% 
+  mutate(download_date = Sys.Date(),
+         download_time = Sys.time())
+
+#Clean customers tracked field
+company_updates$customers_tracked <- gsub(",", "", company_updates$customers_tracked)
+
+company_updates$customers_tracked <- as.numeric(company_updates$customers_tracked)
+
+#bind to older dataset
+
+outages_old <- read_csv("data/company_updates.csv")
+
+company_updates <- bind_rows(company_updates, outages_old)
+
+write_csv(company_updates, "data/company_updates.csv")
+
+```
+
+
+```{r}
+#Make some extra data frames to summarize stuff
+
+#Total county outages (most up to date):
+company_updates %>% 
+  group_by(county) %>% 
+  summarise(total_outages = sum(customers_out))
+
+#Track change in county over time
+county_outages_over_time <- company_updates %>% 
+  group_by(county,download_date, download_time) %>% 
+  summarise(total_outages = sum(customers_out), customers_tracked = sum(customers_tracked))
+
+#Individual company outages over time
+outages_by_company <- company_updates %>% 
+  group_by(company, download_date, download_time) %>% 
+  summarise(total_outages = sum(customers_out), customers_tracked = sum(customers_tracked))
+```
+
+```{r}
+#bind summary files to older versions
+
+#county totals
+county_over_time_old <- read_csv("data/county_outages_over_time.csv")
+
+county_outages_over_time <- bind_rows(county_outages_over_time, county_over_time_old)
+
+write_csv(county_outages_over_time, "data/county_outages_over_time.csv")
+
+
+#company totals
+company_over_time <- read_csv("data/outages_by_company.csv")
+
+outages_by_company <- bind_rows(outages_by_company, company_over_time)
+
+write_csv(outages_by_company, "data/outages_by_company.csv")
+```
+
